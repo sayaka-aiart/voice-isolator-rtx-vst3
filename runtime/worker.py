@@ -98,6 +98,11 @@ def warm_up(model, np):
 def run(shared, root, rate, packaged=False):
     sys.path.insert(0, str(root / "inworld"))
     if packaged:
+        # The installed engine holds sources only and the plug-in starts it
+        # with -B. Compile each module once into the engine's cache folder,
+        # which the uninstaller removes, and load the compiled copies after.
+        sys.pycache_prefix = str(root / "cache" / "pycache")
+        sys.dont_write_bytecode = False
         import rtx_platform
         rtx_platform.configure(root)
     import numpy as np
