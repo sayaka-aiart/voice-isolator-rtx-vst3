@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(VoiceIsolatorRTX VERSION 1.0.2 LANGUAGES C CXX)
+project(VoiceIsolatorRTX VERSION 1.1.0 LANGUAGES C CXX)
 
 if(NOT MSVC OR NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
     message(FATAL_ERROR "Build for Windows x64 using MSVC (Visual Studio 2022, -A x64).")
@@ -25,7 +25,8 @@ smtg_add_vst3plugin(VoiceIsolatorRTX
     PACKAGE_NAME "VoiceIsolatorRTX"
     SOURCES_LIST src/plugin.cpp src/bridge.cpp src/editor.cpp)
 target_link_libraries(VoiceIsolatorRTX PRIVATE sdk ole32 advapi32 comctl32)
-target_compile_definitions(VoiceIsolatorRTX PRIVATE VOICE_ISOLATOR_RTX NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(VoiceIsolatorRTX PRIVATE VOICE_ISOLATOR_RTX NOMINMAX WIN32_LEAN_AND_MEAN
+    "VOICE_ISOLATOR_VERSION_STRING=\"${PROJECT_VERSION}\"")
 target_link_options(VoiceIsolatorRTX PRIVATE /PDBALTPATH:%_PDB%)
 
 configure_file("LICENSE" "${CMAKE_CURRENT_BINARY_DIR}/Voice-Isolator-RTX-LICENSE.txt" COPYONLY)

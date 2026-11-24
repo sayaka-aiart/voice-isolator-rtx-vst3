@@ -21,7 +21,11 @@ static DECLARE_UID(ProcessorId, 0x9A744A42, 0x489A4A82, 0xB8966F36, 0x5BB2A651);
 static DECLARE_UID(ControllerId, 0x43AEFAA2, 0x4A024733, 0xAE509402, 0xC94C669C);
 #define ISOLATOR_NAME "Voice Isolator RTX"
 #define ISOLATOR_CONTROLLER "Voice Isolator RTX Controller"
-#define ISOLATOR_VERSION "1.0.2"
+#define ISOLATOR_VERSION VOICE_ISOLATOR_VERSION_STRING
+
+constexpr uint32 modelLookahead = 1568;     // Samples at the model's 48 kHz rate.
+constexpr uint32 lowGpuBudget = 432;        // 9 ms at 48 kHz.
+constexpr uint32 latencyNoticeSteps = 1u << 20; // Every step is exact even in float32.
 
 // Fade the last audible mix to silence when its GPU result is missing.
 // Keep each channel's own anchor, including on a second miss during recovery.
@@ -161,7 +165,7 @@ public:
         latency->appendString(STR16("Standard"));
         latency->appendString(STR16("Low"));
         parameters.addParameter(latency);
-        parameters.addParameter(STR16("Latency changed"), nullptr, 1, 0,
+        parameters.addParameter(STR16("Latency changed"), nullptr, 0, 0,
                                 ParameterInfo::kIsReadOnly | ParameterInfo::kIsHidden, LatencyNotice);
 #endif
         return r;
@@ -176,13 +180,14 @@ public:
         return setParamNormalized(Bypass, settings.bypass ? 1. : 0.);
     }
 #ifdef VOICE_ISOLATOR_RTX
-    // The processor raises the notice when its delay differs from the one the host last read.
-    // Asking the host only then keeps it from reading the old delay before the processor
-    // has received the new setting.
+    // Hosts may forward only the latest output parameter. Each applied change has
+    // a distinct notice, including a return to Standard before the next UI update.
     tresult PLUGIN_API setParamNormalized(ParamID id, ParamValue value) override {
-        const bool raised = id == LatencyNotice && value >= .5 && getParamNormalized(LatencyNotice) < .5;
+        const bool pending = id == LatencyNotice && value > 0.;
+        if (pending && !componentHandler) return kResultOk; // Retry when a handler is connected.
+        const bool changed = pending && value != getParamNormalized(LatencyNotice);
         const auto result = EditController::setParamNormalized(id, value);
-        if (raised && componentHandler) componentHandler->restartComponent(kLatencyChanged);
+        if (changed && result == kResultOk) componentHandler->restartComponent(kLatencyChanged);
         return result;
     }
     IPlugView* PLUGIN_API createView(FIDString name) override {
@@ -220,15 +225,12 @@ public:
         const uint32 resampling = s.sampleRate != 48000. ? 32 + static_cast<uint32>(std::ceil(32 * ratio)) : 0;
         const uint32 standard = static_cast<uint32>(std::ceil(2048 * ratio)) + block + resampling;
 #ifdef VOICE_ISOLATOR_RTX
-        // The model needs 1568 samples after an output sample: its 2048-sample window less the
-        // 480 samples by which the worker advances the synthesis. Beyond that, both settings
-        // leave the worker at least 480 samples (10 ms) to finish a frame. The standard delay
-        // adds a whole block to them. The low setting only rounds them up to whole blocks,
-        // which is the least that holds for any block size.
-        const auto budget = static_cast<uint32>(std::ceil(480 * ratio));
-        const uint32 low = static_cast<uint32>(std::ceil(1568 * ratio)) + (budget + block - 1) / block * block;
-        delays = {standard, low + resampling};
-        delay = delays[latency.load()];
+        // The callback consumes its whole output at entry. A long callback can need
+        // the result up to one maximum block early, even after a very short input
+        // callback. Reserve that block separately from inference time in both modes.
+        const uint32 low = static_cast<uint32>(std::ceil((modelLookahead + lowGpuBudget) * ratio)) + block + resampling;
+        delays = {standard, low};
+        delay = delays[latencyMode()];
 #else
         delay = standard;
 #endif
@@ -242,10 +244,11 @@ public:
     }
 #ifdef VOICE_ISOLATOR_RTX
     uint32 PLUGIN_API getLatencySamples() override {
-        reported = delays[latency.load()];
-        return reported;
+        const auto samples = delays[latencyMode()];
+        reported = samples;
+        return samples;
     }
-    uint32 PLUGIN_API getTailSamples() override { return delays[latency.load()]; }
+    uint32 PLUGIN_API getTailSamples() override { return delays[latencyMode()]; }
 #else
     uint32 PLUGIN_API getLatencySamples() override { return delay; }
     uint32 PLUGIN_API getTailSamples() override { return delay; }
@@ -272,7 +275,7 @@ public:
     }
     tresult PLUGIN_API getState(IBStream* file) override {
 #ifdef VOICE_ISOLATOR_RTX
-        uint8 data[] = {3, static_cast<uint8>(bypassed.load()), strength.load(), latency.load()};
+        uint8 data[] = {3, static_cast<uint8>(bypassed.load()), strength.load(), latencyMode()};
 #else
         uint8 data[] = {1, static_cast<uint8>(bypassed.load())};
 #endif
@@ -285,7 +288,7 @@ public:
         bypassed = settings.bypass;
 #ifdef VOICE_ISOLATOR_RTX
         strength = settings.strength;
-        latency = settings.latency;
+        setLatencyMode(settings.latency);
 #endif
         return kResultOk;
     }
@@ -302,7 +305,7 @@ public:
                     // The delay changes between blocks, so only the block's last value counts.
                     int32 offset = 0; ParamValue value = 0.;
                     if (q->getPointCount() > 0 && q->getPoint(q->getPointCount() - 1, offset, value) == kResultOk)
-                        latency = value >= .5 ? 1 : 0;
+                        setLatencyMode(value >= .5 ? 1 : 0);
                 }
 #endif
             }
@@ -347,17 +350,36 @@ private:
         int32 index = 0;
         if (auto q = changes->addParameterData(id, index)) q->addPoint(0, val, index);
     }
+#ifdef VOICE_ISOLATOR_RTX
+    uint8 latencyMode() const { return static_cast<uint8>(latencyRevision.load() & 1u); }
+    void setLatencyMode(uint8 mode) {
+        // Each toggle flips the low bit. Preset recalls and audio-thread edits
+        // publish the mode and its notice number in one atomic update.
+        auto revision = latencyRevision.load();
+        while ((revision & 1u) != mode) {
+            if (latencyRevision.compare_exchange_weak(revision, revision + 1u)) return;
+        }
+    }
+#endif
     void reportLatency(IParameterChanges* changes) {
 #ifdef VOICE_ISOLATOR_RTX
-        report(changes, LatencyNotice, delays[latency.load(std::memory_order_relaxed)] !=
-                                       reported.load(std::memory_order_relaxed) ? 1. : 0.);
+        const auto revision = latencyRevision.load();
+        ParamValue notice = 0.; // Supersede any queued request if the host already has this delay.
+        if (delays[revision & 1u] != reported.load()) {
+            // An odd stride visits every step, while placing adjacent mode
+            // changes half a scale apart for hosts that round parameter values.
+            const auto stride = latencyNoticeSteps / 2u + 1u;
+            const auto step = (revision * stride) % latencyNoticeSteps + 1u;
+            notice = static_cast<ParamValue>(step) / latencyNoticeSteps;
+        }
+        report(changes, LatencyNotice, notice);
 #endif
     }
     template<class Sample>
     tresult audio(ProcessData& d, Sample** in, Sample** out, Points& bypassPoints, Points& strengthPoints) {
         const int channels = d.inputs[0].numChannels, count = d.numSamples;
 #ifdef VOICE_ISOLATOR_RTX
-        if (const uint32 selected = delays[latency.load(std::memory_order_relaxed)]; selected != delay) {
+        if (const uint32 selected = delays[latencyMode()]; selected != delay) {
             delay = selected;
             reset();
         }
@@ -418,9 +440,9 @@ private:
     std::array<WetGapFader, 2> gapFaders;
     StrengthRamp strengthRamp;
     std::atomic<uint8> strength{defaultStrength};
-    std::atomic<uint8> latency{0};
+    std::atomic<uint32> latencyRevision{0};
     std::atomic<uint32> reported{0};
-    std::array<uint32, 2> delays{2176, 2080};
+    std::array<uint32, 2> delays{2176, modelLookahead + lowGpuBudget + 128};
 #endif
     std::array<std::vector<double>,2> dry;
     std::vector<float> mono;

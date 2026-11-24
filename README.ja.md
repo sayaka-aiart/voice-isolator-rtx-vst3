@@ -2,11 +2,21 @@
 
 [English](README.md) | **日本語**
 
-話し声の背景ノイズをリアルタイムに抑えるWindows x64用VST3プラグインです。このリポジトリでは、Voice Isolator RTX 1.0.2のプラグイン本体をビルドできます。処理音と原音の割合は100%・80%・50%の3段階で、初期値は処理音100%です。
+話し声の背景ノイズをリアルタイムに抑えるWindows x64用VST3プラグインです。このリポジトリでは、Voice Isolator RTX 1.1.0のプラグイン本体をビルドできます。処理音と原音の割合は100%・80%・50%の3段階で、初期値は処理音100%です。
 
 ## 遅延
 
-プラグインは自身の遅延をホストに申告し、ホストがそれを補正します。48 kHz・128サンプルのバッファーでは2,176サンプル（45.3 ms）です。**Low latency** をオンにすると2,080サンプル（43.3 ms）になります。256サンプルのバッファーでは4.7 ms、512サンプルでは10 ms短くなります。どちらの設定でも、GPUが1フレームを処理する時間として10 ms以上を確保します。標準設定はそこにバッファー1つ分の余裕を足しています。ほかのアプリがGPUを使っていて「Processed audio」が100%を下回る場合は、**Low latency** をオフにしてください。設定を切り替えるとホストが遅延補正を計算し直すため、音声が数秒途切れることがあります。
+**Low latency** をオンにすると、DAWに申告する遅延が48 kHzで1 ms短くなります。どちらのモードでも最大バッファー1個分を確保するため、再生中にDAWが処理するブロックの長さを変えても申告値は一定です。GPUの処理に割り当てる時間はStandardで10 ms、Lowで9 msです。
+
+| 48 kHzでの最大バッファー長 | Standard | Low |
+|---|---|---|
+| 128サンプル | 2,176サンプル（45.33 ms） | 2,128サンプル（44.33 ms） |
+| 256サンプル | 2,304サンプル（48.00 ms） | 2,256サンプル（47.00 ms） |
+| 512サンプル | 2,560サンプル（53.33 ms） | 2,512サンプル（52.33 ms） |
+
+GPUに負荷がかかり「Processed audio」が100%を下回る場合は、Standardに切り替えてください。どちらの方向に切り替えてもDAWに遅延補正の更新を通知します。DAWによっては再計算時に再生が一時的に途切れることがあります。
+
+1.0.2で保存したプロジェクトは1.1.0で開けます。遅延モードはStandardになり、ノイズ除去の強さとバイパス設定を引き継ぎます。1.1.0で保存したプラグイン設定は新しい形式のため、1.0.2では読み込めません。
 
 ## ビルド
 
@@ -25,15 +35,15 @@ cmake --build build --config Release --target VoiceIsolatorRTX --parallel
 
 ## 音声処理に必要なもの
 
-ビルドはGPUのないWindows PCでも行えます。DAWで音を処理するには、対応するNVIDIA GPUと、Voice Isolator RTX 1.0.2用の推論エンジン（エンジン版1.0.0）が必要です。既に配布版を使っているPCでは、そのセットアップが登録した専用Python・CUDAライブラリ・モデルをそのまま使います。
+ビルドはGPUのないWindows PCでも行えます。DAWで音を処理するには、対応するNVIDIA GPUとVoice Isolator RTXの推論エンジン1.0.0が必要です。既に配布版を使っているPCでは、そのセットアップが登録した専用Python・CUDAライブラリ・モデルをそのまま使います。
 
 プラグインは現在のユーザーのレジストリ `HKCU\Software\Local Audio Lab\Voice Isolator RTX` の `EngineRoot` からエンジンを起動します。登録済みのエンジンがない場合は「GPU engine」が「Unavailable」になり、エフェクト出力は無音になります。
 
 ## 推論モデルのダウンロード
 
-初めて使うPCでは、DAWを閉じてWindows配布版の `VoiceIsolatorRTX-1.0.2-Setup-x64.exe` を実行してください。セットアップが推論エンジンを導入し、モデルのダウンロードと検証も行います。プラグインで **GPU engine → Ready** と表示されていれば、モデルは導入済みです。
+初めて使うPCでは、DAWを閉じてWindows配布版の `VoiceIsolatorRTX-1.0.2-Setup-x64.exe` を実行してください。セットアップが推論エンジン1.0.0を導入し、モデルのダウンロードと検証も行います。その後、セットアップが配置したVST3を1.1.0のVST3フォルダーで置き換えます。プラグインで **GPU engine → Ready** と表示されていれば、モデルは導入済みです。
 
-Voice Isolator RTX 1.0.2が使うのは、Inworldのリアルタイムモデル `denoiser_realtime.safetensors`（232,780,800バイト、約233 MB）です。モデルを単独で取得するには、次のリンクから空のフォルダーに保存するか、そのフォルダーでPowerShellを開いて下のコマンドを実行してください。[モデル本体をダウンロード（Hugging Face）](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
+Voice Isolator RTXが使うのは、Inworldのリアルタイムモデル `denoiser_realtime.safetensors`（232,780,800バイト、約233 MB）です。モデルを単独で取得するには、次のリンクから空のフォルダーに保存するか、そのフォルダーでPowerShellを開いて下のコマンドを実行してください。[モデル本体をダウンロード（Hugging Face）](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
 
 ```powershell
 curl.exe --fail --location --retry 2 --output denoiser_realtime.safetensors "https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors"
