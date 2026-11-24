@@ -12,7 +12,7 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 namespace {
 constexpr int width = 366, height = 153;
-constexpr int firstButton = 400, bypassButton = 403;
+constexpr int firstButton = 400, bypassButton = 403, latencyButton = 404;
 constexpr COLORREF panel = RGB(25, 30, 35), button = RGB(42, 50, 57), edge = RGB(68, 80, 88);
 constexpr COLORREF accent = RGB(116, 223, 194), ink = RGB(236, 240, 241), muted = RGB(179, 193, 196);
 
@@ -42,10 +42,11 @@ public:
             buttons[i] = control(L"BUTTON", labels[i], BS_AUTORADIOBUTTON | BS_PUSHLIKE |
                                  (i == 0 ? WS_GROUP | WS_TABSTOP : 0), firstButton + i);
         }
+        latency = control(L"BUTTON", L"Low latency", BS_AUTOCHECKBOX | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, latencyButton);
         bypass = control(L"BUTTON", L"Bypass", BS_AUTOCHECKBOX | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, bypassButton);
         gpu = control(L"STATIC", L"", SS_CENTERIMAGE);
         coverage = control(L"STATIC", L"", SS_CENTERIMAGE | SS_RIGHT);
-        if (!title || !gpu || !coverage || !bypass ||
+        if (!title || !gpu || !coverage || !bypass || !latency ||
             !std::all_of(buttons.begin(), buttons.end(), [](HWND h) { return h != nullptr; })) {
             destroy();
             return kResultFalse;
@@ -73,7 +74,7 @@ public:
         return onSize(&wanted);
     }
 private:
-    HWND window{}, title{}, bypass{}, gpu{}, coverage{};
+    HWND window{}, title{}, bypass{}, latency{}, gpu{}, coverage{};
     std::array<HWND, 3> buttons{};
     std::array<HFONT, 3> fonts{};
     int lastGpu = -1, lastCoverage = -1;
@@ -90,7 +91,7 @@ private:
     }
     void destroy() {
         if (window) DestroyWindow(window);
-        window = title = bypass = gpu = coverage = nullptr;
+        window = title = bypass = latency = gpu = coverage = nullptr;
         buttons.fill(nullptr);
         for (auto& font : fonts) { if (font) DeleteObject(font); font = nullptr; }
         lastGpu = lastCoverage = -1;
@@ -112,7 +113,8 @@ private:
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(f), FALSE);
             MoveWindow(h, px(x), px(y), px(x+w)-px(x), px(y+hgt)-px(y), TRUE);
         };
-        place(title, 18, 12, 245, 29, fonts[0]);
+        place(title, 18, 12, 150, 29, fonts[0]);
+        place(latency, 176, 14, 93, 25, fonts[2]);
         place(bypass, 277, 14, 71, 25, fonts[2]);
         for (int i = 0; i < 3; ++i) place(buttons[i], 18 + 113*i, 53, 104, 48, fonts[1]);
         place(gpu, 18, 115, 169, 24, fonts[2]);
@@ -130,6 +132,7 @@ private:
         const int selected = strengthIndex(controller->getParamNormalized(Strength));
         for (int i = 0; i < 3; ++i) check(buttons[i], selected == 2-i);
         check(bypass, controller->getParamNormalized(Bypass) >= .5);
+        check(latency, controller->getParamNormalized(Latency) >= .5);
         const int state = std::clamp(static_cast<int>(std::lround(controller->getParamNormalized(Engine) * 3)), 0, 3);
         if (state != lastGpu) {
             constexpr const wchar_t* states[] = {L"GPU engine   Loading", L"GPU engine   Ready",
@@ -146,9 +149,10 @@ private:
         }
     }
     void click(int id) {
-        const ParamID param = id == bypassButton ? Bypass : Strength;
-        const double value = id == bypassButton ? (controller->getParamNormalized(Bypass) >= .5 ? 0. : 1.)
-                                                : normalizedStrength(2 - (id - firstButton));
+        const bool toggle = id == bypassButton || id == latencyButton;
+        const ParamID param = id == bypassButton ? Bypass : id == latencyButton ? Latency : Strength;
+        const double value = toggle ? (controller->getParamNormalized(param) >= .5 ? 0. : 1.)
+                                    : normalizedStrength(2 - (id - firstButton));
         if (controller->getParamNormalized(param) != value) {
             controller->beginEdit(param);
             controller->setParamNormalized(param, value);
@@ -193,7 +197,7 @@ private:
             EndPaint(h, &ps);
             return 0;
         }
-        if (msg == WM_KEYDOWN && h != self->bypass &&
+        if (msg == WM_KEYDOWN && h != self->bypass && h != self->latency &&
             (w == VK_LEFT || w == VK_RIGHT || w == VK_UP || w == VK_DOWN)) {
             int delta = w == VK_LEFT || w == VK_UP ? -1 : 1;
             auto next = self->buttons[(GetDlgCtrlID(h) - firstButton + delta + 3) % 3];
@@ -208,7 +212,7 @@ private:
         auto self = reinterpret_cast<StrengthEditor*>(data);
         switch (msg) {
         case WM_COMMAND:
-            if (HIWORD(w) == BN_CLICKED && LOWORD(w) >= firstButton && LOWORD(w) <= bypassButton) {
+            if (HIWORD(w) == BN_CLICKED && LOWORD(w) >= firstButton && LOWORD(w) <= latencyButton) {
                 self->click(LOWORD(w));
                 return 0;
             }

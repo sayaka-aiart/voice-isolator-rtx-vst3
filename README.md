@@ -4,6 +4,10 @@
 
 Voice Isolator RTX is a Windows x64 VST3 plug-in that reduces background noise in speech in real time. This repository contains the source for version 1.0.2. At the default 100% setting, you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
 
+## Latency
+
+The plug-in reports its delay to the host so that the host can compensate for it. With a 128-sample buffer at 48 kHz, the delay is 2,176 samples (45.3 ms). Turning on **Low latency** shortens it to 2,080 samples (43.3 ms). It saves 4.7 ms with a 256-sample buffer and 10 ms with a 512-sample buffer. Both settings give the GPU at least 10 ms to finish each frame, and the standard setting adds one more buffer of margin. If **Processed audio** falls below 100% while another application is using the GPU, turn **Low latency** off. Changing the setting makes the host recompute its delay compensation, which can interrupt the audio for a few seconds.
+
 ## Build
 
 On Windows, install Git, CMake 3.25 or later, and Visual Studio 2022 with the **Desktop development with C++** workload. Include the MSVC v143 toolset and the Windows SDK. Run the following commands in PowerShell.
