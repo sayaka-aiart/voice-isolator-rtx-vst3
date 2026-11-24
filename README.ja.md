@@ -25,6 +25,32 @@ cmake --build build --config Release --target VoiceIsolatorRTX --parallel
 
 プラグインは現在のユーザーのレジストリ `HKCU\Software\Local Audio Lab\Voice Isolator RTX` の `EngineRoot` からエンジンを起動します。登録済みのエンジンがない場合は「GPU engine」が「Unavailable」になり、エフェクト出力は無音になります。
 
+## 推論モデルのダウンロード
+
+初めて使うPCでは、DAWを閉じてWindows配布版の `VoiceIsolatorRTX-1.0.2-Setup-x64.exe` を実行してください。セットアップが推論エンジンを導入し、モデルのダウンロードと検証も行います。プラグインで **GPU engine → Ready** と表示されていれば、モデルは導入済みです。
+
+Voice Isolator RTX 1.0.2が使うのは、Inworldのリアルタイムモデル `denoiser_realtime.safetensors`（232,780,800バイト、約233 MB）です。モデルを単独で取得するには、次のリンクから空のフォルダーに保存するか、そのフォルダーでPowerShellを開いて下のコマンドを実行してください。[モデル本体をダウンロード（Hugging Face）](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
+
+```powershell
+curl.exe --fail --location --retry 2 --output denoiser_realtime.safetensors "https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors"
+if ($LASTEXITCODE -ne 0) { throw 'Model download failed.' }
+```
+
+どちらの方法で取得した場合も、保存先のフォルダーで次を実行してください。`True` と表示されればSHA-256が一致しています。`False` の場合は、使用する前にダウンロードし直してください。
+
+```powershell
+$expected = '76598f05523c0669e76562a8b2f31c9d395fca316e80c907ee11775e7497ae0f'
+(Get-FileHash -LiteralPath '.\denoiser_realtime.safetensors' -Algorithm SHA256 -ErrorAction Stop).Hash -eq $expected
+```
+
+導入済みの環境でモデルが消えた場合や破損した場合は、DAWを閉じてください。64ビット版PowerShellで次を実行すると、プラグインが読み込むファイルの場所が表示されます。検証済みのファイルをその場所にコピーし、プラグインを開き直して **GPU engine** が **Ready** になることを確認してください。
+
+```powershell
+$key = 'HKCU:\Software\Local Audio Lab\Voice Isolator RTX'
+$engine = Get-ItemPropertyValue -LiteralPath $key -Name EngineRoot -ErrorAction Stop
+Join-Path $engine 'inworld\models\denoiser_realtime.safetensors'
+```
+
 ## ライセンス
 
 プラグイン独自部分は[MITライセンス](LICENSE)です。VST3 SDKはサブモジュールで固定したSteinberg製のMITライセンスのSDKです。VSTはSteinberg Media Technologies GmbHの商標です。[Steinberg VST3 SDK](https://github.com/steinbergmedia/vst3sdk)

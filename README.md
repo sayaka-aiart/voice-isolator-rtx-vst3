@@ -25,6 +25,32 @@ You can build the plug-in on a Windows PC without a GPU. To process audio in a D
 
 To locate the engine, the plug-in reads the `EngineRoot` value under `HKCU\Software\Local Audio Lab\Voice Isolator RTX` in the current user's Windows registry. If no engine is registered, **GPU engine** shows **Unavailable** and the effect outputs silence.
 
+## Download the inference model
+
+On a new PC, close your DAW and run `VoiceIsolatorRTX-1.0.2-Setup-x64.exe` from the Windows distribution. Setup installs the inference engine and automatically downloads and verifies the model. If the plug-in already shows **GPU engine → Ready**, the model is installed.
+
+Voice Isolator RTX 1.0.2 uses Inworld's realtime checkpoint, `denoiser_realtime.safetensors` (232,780,800 bytes, about 233 MB). To get the model separately, save it to an empty folder using the download link, or open PowerShell there and run the command below. [Download the model from Hugging Face](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
+
+```powershell
+curl.exe --fail --location --retry 2 --output denoiser_realtime.safetensors "https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors"
+if ($LASTEXITCODE -ne 0) { throw 'Model download failed.' }
+```
+
+Verify either download by running the following in the folder containing the file. `True` means the SHA-256 matches. If you get `False`, download the file again before using it.
+
+```powershell
+$expected = '76598f05523c0669e76562a8b2f31c9d395fca316e80c907ee11775e7497ae0f'
+(Get-FileHash -LiteralPath '.\denoiser_realtime.safetensors' -Algorithm SHA256 -ErrorAction Stop).Hash -eq $expected
+```
+
+To restore a missing or damaged model in an existing installation, close your DAW. Run the following in 64-bit PowerShell to find the exact destination, then copy the verified file there. Reopen the plug-in and check that **GPU engine** shows **Ready**.
+
+```powershell
+$key = 'HKCU:\Software\Local Audio Lab\Voice Isolator RTX'
+$engine = Get-ItemPropertyValue -LiteralPath $key -Name EngineRoot -ErrorAction Stop
+Join-Path $engine 'inworld\models\denoiser_realtime.safetensors'
+```
+
 ## License
 
 The original plug-in code is licensed under the MIT License. The Steinberg VST3 SDK also uses the MIT License and is pinned to a specific revision as a Git submodule. VST is a trademark of Steinberg Media Technologies GmbH. [Plug-in license](LICENSE) · [Steinberg VST3 SDK](https://github.com/steinbergmedia/vst3sdk)
