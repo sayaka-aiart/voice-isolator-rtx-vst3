@@ -77,6 +77,24 @@ class RateConverter:
         return y
 
 
+def warm_up(model, np):
+    """Capture the one- and two-lane CUDA graphs before the first live frame.
+
+    The graphs depend on the number of lanes, not on the window length. With
+    a 4-frame window and a 2-frame crossfade, eight frames pass through two
+    crossfades and two lane swaps. The model's own 600-frame window needs
+    six seconds of audio to reach its first swap. The session is created at
+    full size, so its attention buffers return to PyTorch's pool for the live
+    sessions.
+    """
+    session = model.stream()
+    window = session.window_frames = 4
+    session.crossfade_frames = 2
+    session.push(np.zeros(1024, np.float32))
+    for _ in range(2 * window - 1):
+        session.push(np.zeros(480, np.float32))
+
+
 def run(shared, root, rate, packaged=False):
     sys.path.insert(0, str(root / "inworld"))
     if packaged:
@@ -87,7 +105,6 @@ def run(shared, root, rate, packaged=False):
     if packaged:
         rtx_platform.select_device(torch)
     from streaming_v2 import ComparisonModel
-    from engine_core import render
 
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -97,7 +114,7 @@ def run(shared, root, rate, packaged=False):
     input_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
     output_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*CAPACITY)
     with torch.inference_mode():
-        render(model, np.zeros(297600, np.float32), 1)
+        warm_up(model, np)
         session = model.stream()
         torch.cuda.synchronize()
         shared.set(PID, os.getpid())
