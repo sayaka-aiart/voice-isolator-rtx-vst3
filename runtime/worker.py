@@ -110,12 +110,15 @@ def run(shared, root, rate, packaged=False):
     if packaged:
         rtx_platform.select_device(torch)
     from streaming_v2 import ComparisonModel
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from frame_graphs import ChainedSections
 
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
     model = ComparisonModel(lookahead=0, variant="ordered", advance_hops=1)
+    model.sections = ChainedSections(model.base.vi.model, model.optimized_bands)
     input_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
     output_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*CAPACITY)
     with torch.inference_mode():

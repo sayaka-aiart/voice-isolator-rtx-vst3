@@ -32,6 +32,7 @@ configure_file("LICENSE" "${CMAKE_CURRENT_BINARY_DIR}/Voice-Isolator-RTX-LICENSE
 configure_file("${SDK_ROOT}/LICENSE.txt" "${CMAKE_CURRENT_BINARY_DIR}/Steinberg-SDK-LICENSE.txt" COPYONLY)
 smtg_target_add_plugin_resources(VoiceIsolatorRTX RESOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/runtime/worker.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/frame_graphs.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/licenses/Inworld-LICENSE.txt"
     "${CMAKE_CURRENT_SOURCE_DIR}/licenses/Inworld-NOTICE.txt"
     "${CMAKE_CURRENT_BINARY_DIR}/Voice-Isolator-RTX-LICENSE.txt"
