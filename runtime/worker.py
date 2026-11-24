@@ -1,5 +1,6 @@
 """Local Windows worker for one 48 kHz Inworld Isolator 38 VST3 instance."""
 import ctypes as ct
+import gc
 import mmap
 import os
 from pathlib import Path
@@ -144,6 +145,10 @@ def run(shared, root, rate, packaged=False):
         warm_up(model, np)
         session = model.stream()
         torch.cuda.synchronize()
+        # A full garbage collection walks every object created while loading and stops
+        # this thread for tens of milliseconds. Later collections skip the frozen objects,
+        # and sessions are still released by their reference counts.
+        gc.freeze()
         shared.set(PID, os.getpid())
         shared.set(STATE, 1)
         shared.notify()
