@@ -77,6 +77,24 @@ class RateConverter:
         return y
 
 
+def raise_priority():
+    """Schedule the worker's CPU time ahead of ordinary applications.
+
+    A frame has a few audio blocks to reach the plug-in, and at normal
+    priority a busy machine can keep the worker waiting longer than that.
+    Priority 15 is the highest below the real-time range, so the host's
+    audio threads still run first. The GPU scheduling class keeps its
+    default: its realtime class shortened the typical frame beside another
+    GPU load but added stalls of 20 to 38 ms.
+    """
+    kernel = ct.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = kernel.GetCurrentThread.restype = ct.c_void_p
+    kernel.SetPriorityClass.argtypes = [ct.c_void_p, ct.c_uint32]
+    kernel.SetThreadPriority.argtypes = [ct.c_void_p, ct.c_int]
+    kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x80)  # HIGH_PRIORITY_CLASS
+    kernel.SetThreadPriority(kernel.GetCurrentThread(), 15)  # THREAD_PRIORITY_TIME_CRITICAL
+
+
 def warm_up(model, np):
     """Capture the one- and two-lane CUDA graphs before the first live frame.
 
@@ -96,6 +114,7 @@ def warm_up(model, np):
 
 
 def run(shared, root, rate, packaged=False):
+    raise_priority()
     sys.path.insert(0, str(root / "inworld"))
     if packaged:
         # The installed engine holds sources only and the plug-in starts it
