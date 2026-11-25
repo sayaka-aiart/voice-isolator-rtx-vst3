@@ -2,11 +2,15 @@
 
 **English** | [日本語](README.ja.md)
 
-Voice Isolator RTX is a Windows x64 VST3 plug-in that reduces background noise in speech in real time. This repository contains the source for version 1.2.0. At the default 100% setting, you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
+This repository contains the source for Voice Isolator RTX, a Windows x64 VST3 plug-in that reduces background noise in speech in real time.
+
+In version 1.2.0, select **5 ms** or **10 ms** under **Extra synthesis advance** to reduce the plug-in delay reported to your DAW by that amount at 48 kHz. The default **0 ms** uses the same synthesis timing as version 1.1.0.
+
+**Noise reduction** sets the mix. At 100% (default), you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
 
 ## Latency modes
 
-**Extra synthesis advance** sets how much earlier the plug-in finalizes the processed audio relative to version 1.1.0. The 5 ms and 10 ms presets shorten the synthesis overlap, which can change the texture of speech and how much of a brief background sound remains. **Noise reduction** independently sets the mix of processed and original audio.
+All three presets use the same model and process audio in 10 ms steps. The 5 ms and 10 ms presets shorten the overlap between synthesized frames so the plug-in can output the audio sooner. This can change the texture of speech and how much of a brief background sound remains.
 
 With **Low latency** off (Standard, the default), the GPU has a 10 ms processing allowance. Turning it on reduces that allowance to 9 ms, saving another 1 ms at 48 kHz with any synthesis preset. The table shows the delay reported to the DAW at **48 kHz with a maximum block size of 128 samples**.
 
