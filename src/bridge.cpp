@@ -98,17 +98,19 @@ int Bridge::state() const {
     if (!shared || !process || WaitForSingleObject(process, 0) == WAIT_OBJECT_0) return -1;
     return static_cast<int>(read(State));
 }
-void Bridge::reset(int64_t cursor) {
+void Bridge::reset(int64_t cursor, int64_t advanceMode) {
     if (!shared) return;
     epoch += 2;
     store(Epoch, epoch - 1);
+    store(AdvanceMode, advanceMode);
     origin = cursor; store(Origin, cursor); store(InputEnd, cursor);
     store(Epoch, epoch);
     SetEvent(inputEvent);
 }
 void Bridge::publish(int64_t first, int count, const float* left, const float* right) {
     if (!shared) return;
-    if (first + count - std::max<int64_t>(origin, read(Consumed)) > capacity - 2048) reset(first);
+    if (first + count - std::max<int64_t>(origin, read(Consumed)) > capacity - 2048)
+        reset(first, read(AdvanceMode));
     for (int i = 0; i < count; ++i)
         shared->input[(first + i) & (capacity - 1)] = right ? (left[i] + right[i]) * 0.5f : left[i];
     store(InputEnd, first + count);

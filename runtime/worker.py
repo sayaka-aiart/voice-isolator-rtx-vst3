@@ -9,7 +9,8 @@ import traceback
 
 CAPACITY = 1 << 18
 HEADER = 128
-MAGIC, STOP, STATE, EPOCH, ORIGIN, INPUT_END, CONSUMED, WET_EPOCH, WET_END, PID = range(10)
+MAGIC, STOP, STATE, EPOCH, ORIGIN, INPUT_END, CONSUMED, WET_EPOCH, WET_END, PID, ADVANCE_MODE = range(11)
+ADVANCE_HOPS = (1.0, 1.5, 2.0)  # Default, 5 ms earlier, 10 ms earlier at a 480-sample hop.
 
 
 class Shared:
@@ -28,7 +29,7 @@ class Shared:
         self.win.SetEvent.argtypes = [ct.c_void_p]
         self.input_event = self.win.OpenEventW(0x100000, 0, name + "-input")
         self.output_event = self.win.OpenEventW(2, 0, name + "-output")
-        if self.get(MAGIC) != 0x495749333801 or not self.input_event or not self.output_event:
+        if self.get(MAGIC) != 0x495749333802 or not self.input_event or not self.output_event:
             raise RuntimeError("VST3 IPC protocol mismatch")
 
     def get(self, key):
@@ -137,7 +138,7 @@ def run(shared, root, rate, packaged=False):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
-    model = ComparisonModel(lookahead=0, variant="ordered", advance_hops=1)
+    model = ComparisonModel(lookahead=0, variant="ordered", advance_hops=ADVANCE_HOPS[0])
     model.sections = ChainedSections(model.base.vi.model, model.optimized_bands)
     input_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
     output_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*CAPACITY)
@@ -153,6 +154,7 @@ def run(shared, root, rate, packaged=False):
         shared.set(STATE, 1)
         shared.notify()
         previous = None
+        used = False
         while not shared.get(STOP):
             epoch = shared.get(EPOCH)
             if not epoch or epoch & 1:
@@ -160,9 +162,13 @@ def run(shared, root, rate, packaged=False):
                 continue
             if previous != epoch:
                 origin = shared.get(ORIGIN)
+                mode = shared.get(ADVANCE_MODE)
                 if shared.get(EPOCH) != epoch:
                     continue
-                if previous is not None and used:
+                if not 0 <= mode < len(ADVANCE_HOPS):
+                    raise ValueError(f"Unsupported synthesis advance mode {mode}")
+                if used or model.advance_hops != ADVANCE_HOPS[mode]:
+                    model.advance_hops = ADVANCE_HOPS[mode]
                     session = model.stream()
                 used = False
                 resample_in, resample_out = RateConverter(np, rate, 48000), RateConverter(np, 48000, rate)

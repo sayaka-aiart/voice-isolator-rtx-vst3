@@ -2,21 +2,25 @@
 
 **English** | [日本語](README.ja.md)
 
-Voice Isolator RTX is a Windows x64 VST3 plug-in that reduces background noise in speech in real time. This repository contains the source for version 1.1.0. At the default 100% setting, you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
+Voice Isolator RTX is a Windows x64 VST3 plug-in that reduces background noise in speech in real time. This repository contains the source for version 1.2.0. At the default 100% setting, you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
 
-## Latency
+## Latency modes
 
-**Low latency** reduces the delay reported to the DAW by 1 ms at 48 kHz. Both modes reserve a full maximum block so the delay stays constant when the DAW varies its block size during playback. Standard allows 10 ms for GPU processing and Low allows 9 ms.
+**Extra synthesis advance** sets how much earlier the plug-in finalizes the processed audio relative to version 1.1.0. The 5 ms and 10 ms presets shorten the synthesis overlap, which can change the texture of speech and how much of a brief background sound remains. **Noise reduction** independently sets the mix of processed and original audio.
 
-| Maximum block at 48 kHz | Standard | Low |
-|---|---|---|
-| 128 samples | 2,176 samples (45.33 ms) | 2,128 samples (44.33 ms) |
-| 256 samples | 2,304 samples (48.00 ms) | 2,256 samples (47.00 ms) |
-| 512 samples | 2,560 samples (53.33 ms) | 2,512 samples (52.33 ms) |
+With **Low latency** off (Standard, the default), the GPU has a 10 ms processing allowance. Turning it on reduces that allowance to 9 ms, saving another 1 ms at 48 kHz with any synthesis preset. The table shows the delay reported to the DAW at **48 kHz with a maximum block size of 128 samples**.
 
-If **Processed audio** drops below 100% under GPU load, switch to Standard. Switching in either direction asks the DAW to update plug-in delay compensation. Some hosts briefly interrupt playback during this update.
+| Extra synthesis advance | Typical use | Standard | Low latency |
+|---|---|---:|---:|
+| 0 ms (default) | Record or mix with the original 1.1.0 sound. | 45.33 ms | 44.33 ms |
+| 5 ms | Reduce the delay when monitoring your voice, with moderate synthesis overlap. | 40.33 ms | 39.33 ms |
+| 10 ms | Use the shortest monitoring delay. Compare the sound with 0 ms on your own voice. | 35.33 ms | 34.33 ms |
 
-Version 1.1.0 opens projects saved with 1.0.2 using Standard latency and restores their noise reduction and bypass settings. Projects saved with 1.1.0 use a newer plug-in state format that 1.0.2 cannot read.
+All modes reserve a full maximum host block for variable callbacks. At 48 kHz, a 256-sample maximum adds 2.67 ms to the 128-sample figure, and a 512-sample maximum adds 8 ms. Microphone-to-headphone monitoring also includes the audio interface and driver round trip.
+
+If **Processed audio** drops below 100% under GPU load, switch to Standard. Changing either latency control asks the DAW to update plug-in delay compensation. Playback can briefly pause while the new synthesis stream fills.
+
+Projects from earlier versions open with **0 ms** extra advance and retain their saved noise reduction, bypass and latency settings. Projects predating the Low latency control use Standard. Version 1.1.0 can reopen settings saved at 0 ms. Settings saved at 5 or 10 ms require version 1.2.0 or later.
 
 ## Build
 
@@ -41,7 +45,7 @@ To locate the engine, the plug-in reads the `EngineRoot` value under `HKCU\Softw
 
 ## Download the inference model
 
-On a new PC, close your DAW and run `VoiceIsolatorRTX-1.0.2-Setup-x64.exe` from the Windows distribution. Setup installs engine 1.0.0 and downloads and verifies the model. Then copy the 1.1.0 VST3 bundle over the plug-in installed by setup. If the plug-in already shows **GPU engine → Ready**, the model is installed.
+Extract `VoiceIsolatorRTX-1.2.0-Windows-x64.zip`, close your DAW, and run `VoiceIsolatorRTX-1.2.0-Setup-x64.exe`. On a new PC, setup installs the VST3 and engine 1.0.0 and downloads and verifies the model. When upgrading in the same location, setup reuses the verified engine and model. To use a build from this repository, copy your entire built VST3 folder over the installed one, then reopen the DAW.
 
 Voice Isolator RTX uses Inworld's realtime checkpoint, `denoiser_realtime.safetensors` (232,780,800 bytes, about 233 MB). To get the model separately, save it to an empty folder using the download link, or open PowerShell there and run the command below. [Download the model from Hugging Face](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
 

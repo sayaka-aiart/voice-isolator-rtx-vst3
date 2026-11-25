@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(VoiceIsolatorRTX VERSION 1.1.0 LANGUAGES C CXX)
+project(VoiceIsolatorRTX VERSION 1.2.0 LANGUAGES C CXX)
 
 if(NOT MSVC OR NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
     message(FATAL_ERROR "Build for Windows x64 using MSVC (Visual Studio 2022, -A x64).")

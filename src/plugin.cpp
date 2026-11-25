@@ -23,9 +23,21 @@ static DECLARE_UID(ControllerId, 0x43AEFAA2, 0x4A024733, 0xAE509402, 0xC94C669C)
 #define ISOLATOR_CONTROLLER "Voice Isolator RTX Controller"
 #define ISOLATOR_VERSION VOICE_ISOLATOR_VERSION_STRING
 
-constexpr uint32 modelLookahead = 1568;     // Samples at the model's 48 kHz rate.
-constexpr uint32 lowGpuBudget = 432;        // 9 ms at 48 kHz.
+constexpr uint32 lowBit = 1, advanceBits = 6, timingBits = lowBit | advanceBits;
+constexpr uint32 revisionStep = timingBits + 1;
 constexpr uint32 latencyNoticeSteps = 1u << 20; // Every step is exact even in float32.
+
+// Entries alternate Standard and Low. Both keep a full maximum host block
+// for variable callbacks. All synthesis and GPU budgets below are at 48 kHz.
+static std::array<uint32, 6> processingDelays(double ratio, uint32 block, uint32 resampling) {
+    std::array<uint32, 6> result{};
+    for (uint32 i = 0; i < result.size(); ++i) {
+        const uint32 synthesis = 1568 - (i >> 1) * 240; // 0, 5 or 10 ms earlier than 1.1.0.
+        const uint32 gpu = (i & lowBit) ? 432 : 480;
+        result[i] = static_cast<uint32>(std::ceil((synthesis + gpu) * ratio)) + block + resampling;
+    }
+    return result;
+}
 
 // Fade the last audible mix to silence when its GPU result is missing.
 // Keep each channel's own anchor, including on a second miss during recovery.
@@ -98,16 +110,19 @@ struct Settings {
     bool bypass = false;
     uint8 strength = defaultStrength;
     uint8 latency = 0;
+    uint8 advance = 0;
 };
 static bool loadSettings(IBStream* file, Settings& settings) {
     uint8 data[2]{}; int32 n = 0;
     if (!file || file->read(data, 2, &n) != kResultOk || n != 2) return false;
     if (data[0] != 1) {
 #ifdef VOICE_ISOLATOR_RTX
-        if ((data[0] != 2 && data[0] != 3) || file->read(&settings.strength, 1, &n) != kResultOk ||
+        if ((data[0] < 2 || data[0] > 4) || file->read(&settings.strength, 1, &n) != kResultOk ||
             n != 1 || settings.strength >= wetFractions.size()) return false;
-        if (data[0] == 3 && (file->read(&settings.latency, 1, &n) != kResultOk ||
+        if (data[0] >= 3 && (file->read(&settings.latency, 1, &n) != kResultOk ||
                              n != 1 || settings.latency > 1)) return false;
+        if (data[0] == 4 && (file->read(&settings.advance, 1, &n) != kResultOk ||
+                             n != 1 || settings.advance > 2)) return false;
 #else
         return false;
 #endif
@@ -158,7 +173,7 @@ public:
         strength->appendString(STR16("50%"));
         strength->appendString(STR16("80%"));
         strength->appendString(STR16("100%"));
-        strength->getInfo().defaultNormalizedValue = normalizedStrength(defaultStrength);
+        strength->getInfo().defaultNormalizedValue = normalizedPreset(defaultStrength);
         strength->setNormalized(strength->getInfo().defaultNormalizedValue);
         parameters.addParameter(strength);
         auto latency = new StringListParameter(STR16("Latency"), Latency, nullptr, ParameterInfo::kIsList);
@@ -167,6 +182,12 @@ public:
         parameters.addParameter(latency);
         parameters.addParameter(STR16("Latency changed"), nullptr, 0, 0,
                                 ParameterInfo::kIsReadOnly | ParameterInfo::kIsHidden, LatencyNotice);
+        auto advance = new StringListParameter(STR16("Extra synthesis advance"), SynthesisAdvance, nullptr,
+                                               ParameterInfo::kIsList);
+        advance->appendString(STR16("0 ms"));
+        advance->appendString(STR16("5 ms"));
+        advance->appendString(STR16("10 ms"));
+        parameters.addParameter(advance);
 #endif
         return r;
     }
@@ -174,8 +195,9 @@ public:
         Settings settings;
         if (!loadSettings(file, settings)) return kResultFalse;
 #ifdef VOICE_ISOLATOR_RTX
-        setParamNormalized(Strength, normalizedStrength(settings.strength));
+        setParamNormalized(Strength, normalizedPreset(settings.strength));
         setParamNormalized(Latency, settings.latency ? 1. : 0.);
+        setParamNormalized(SynthesisAdvance, normalizedPreset(settings.advance));
 #endif
         return setParamNormalized(Bypass, settings.bypass ? 1. : 0.);
     }
@@ -223,18 +245,15 @@ public:
         const double ratio = s.sampleRate / 48000.;
         const auto block = static_cast<uint32>(s.maxSamplesPerBlock);
         const uint32 resampling = s.sampleRate != 48000. ? 32 + static_cast<uint32>(std::ceil(32 * ratio)) : 0;
-        const uint32 standard = static_cast<uint32>(std::ceil(2048 * ratio)) + block + resampling;
 #ifdef VOICE_ISOLATOR_RTX
-        // The callback consumes its whole output at entry. A long callback can need
-        // the result up to one maximum block early, even after a very short input
-        // callback. Reserve that block separately from inference time in both modes.
-        const uint32 low = static_cast<uint32>(std::ceil((modelLookahead + lowGpuBudget) * ratio)) + block + resampling;
-        delays = {standard, low};
-        delay = delays[latencyMode()];
+        delays = processingDelays(ratio, block, resampling);
+        const uint32 maximumDelay = delays[0];
+        delay = delays[timingMode()];
 #else
-        delay = standard;
+        const uint32 maximumDelay = static_cast<uint32>(std::ceil(2048 * ratio)) + block + resampling;
+        delay = maximumDelay;
 #endif
-        for (auto& channel : dry) channel.assign(standard, 0.);
+        for (auto& channel : dry) channel.assign(maximumDelay, 0.);
         mono.resize(s.maxSamplesPerBlock);
 #ifdef VOICE_ISOLATOR_RTX
         for (auto& fader : gapFaders) fader.prepare(s.sampleRate);
@@ -244,11 +263,11 @@ public:
     }
 #ifdef VOICE_ISOLATOR_RTX
     uint32 PLUGIN_API getLatencySamples() override {
-        const auto samples = delays[latencyMode()];
+        const auto samples = delays[timingMode()];
         reported = samples;
         return samples;
     }
-    uint32 PLUGIN_API getTailSamples() override { return delays[latencyMode()]; }
+    uint32 PLUGIN_API getTailSamples() override { return delays[timingMode()]; }
 #else
     uint32 PLUGIN_API getLatencySamples() override { return delay; }
     uint32 PLUGIN_API getTailSamples() override { return delay; }
@@ -275,12 +294,18 @@ public:
     }
     tresult PLUGIN_API getState(IBStream* file) override {
 #ifdef VOICE_ISOLATOR_RTX
-        uint8 data[] = {3, static_cast<uint8>(bypassed.load()), strength.load(), latencyMode()};
+        const auto mode = timingMode();
+        const auto advance = static_cast<uint8>(mode >> 1);
+        // Projects using the original synthesis can still reopen in 1.1.0.
+        uint8 data[] = {static_cast<uint8>(advance ? 4 : 3), static_cast<uint8>(bypassed.load()),
+                        strength.load(), static_cast<uint8>(mode & lowBit), advance};
+        const int32 length = advance ? sizeof(data) : sizeof(data) - 1;
 #else
         uint8 data[] = {1, static_cast<uint8>(bypassed.load())};
+        const int32 length = sizeof(data);
 #endif
         int32 n = 0;
-        return file && file->write(data, sizeof(data), &n) == kResultOk && n == sizeof(data) ? kResultOk : kResultFalse;
+        return file && file->write(data, length, &n) == kResultOk && n == length ? kResultOk : kResultFalse;
     }
     tresult PLUGIN_API setState(IBStream* file) override {
         Settings settings;
@@ -288,12 +313,15 @@ public:
         bypassed = settings.bypass;
 #ifdef VOICE_ISOLATOR_RTX
         strength = settings.strength;
-        setLatencyMode(settings.latency);
+        setTiming(timingBits, (uint32(settings.advance) << 1) | settings.latency);
 #endif
         return kResultOk;
     }
     tresult PLUGIN_API process(ProcessData& d) override {
         Points bypassPoints, strengthPoints;
+#ifdef VOICE_ISOLATOR_RTX
+        uint32 changedBits = 0, requestedBits = 0;
+#endif
         if (d.inputParameterChanges) {
             for (int32 i = 0; i < d.inputParameterChanges->getParameterCount(); ++i) {
                 auto q = d.inputParameterChanges->getParameterData(i);
@@ -301,18 +329,37 @@ public:
                 if (q->getParameterId() == Bypass) bypassPoints.attach(q);
 #ifdef VOICE_ISOLATOR_RTX
                 if (q->getParameterId() == Strength) strengthPoints.attach(q);
-                if (q->getParameterId() == Latency) {
+                if (q->getParameterId() == Latency || q->getParameterId() == SynthesisAdvance) {
                     // The delay changes between blocks, so only the block's last value counts.
                     int32 offset = 0; ParamValue value = 0.;
-                    if (q->getPointCount() > 0 && q->getPoint(q->getPointCount() - 1, offset, value) == kResultOk)
-                        setLatencyMode(value >= .5 ? 1 : 0);
+                    if (q->getPointCount() > 0 && q->getPoint(q->getPointCount() - 1, offset, value) == kResultOk) {
+                        const bool low = q->getParameterId() == Latency;
+                        const uint32 mask = low ? lowBit : advanceBits;
+                        const uint32 bits = low ? uint32(value >= .5) : uint32(presetIndex(value)) << 1;
+                        changedBits |= mask;
+                        requestedBits = (requestedBits & ~mask) | bits;
+                    }
                 }
 #endif
             }
         }
+#ifdef VOICE_ISOLATOR_RTX
+        if (changedBits) setTiming(changedBits, requestedBits);
+        const auto mode = timingMode();
+        const uint32 advance = mode >> 1;
+        if (active && delay != delays[mode]) {
+            delay = delays[mode];
+            reset();
+        }
+#else
+        constexpr uint32 advance = 0;
+#endif
         if (!d.numSamples || !d.numInputs || !d.numOutputs) {
             applyChanges(bypassPoints, strengthPoints, INT32_MAX);
             const int s = bridge.state();
+            // A stopped host can send a parameter-only flush. Let the worker
+            // prepare the selected stream before the next audio block arrives.
+            if (active && s == 1) startStream(advance);
             report(d.outputParameterChanges, Engine, s < 0 ? 1. : s == 1 ? 1./3. : 0.);
             reportLatency(d.outputParameterChanges);
             return kResultOk;
@@ -327,14 +374,14 @@ public:
             nextProject = position + d.numSamples;
         } else tracking = false;
         return d.symbolicSampleSize == kSample64
-            ? audio(d, d.inputs[0].channelBuffers64, d.outputs[0].channelBuffers64, bypassPoints, strengthPoints)
-            : audio(d, d.inputs[0].channelBuffers32, d.outputs[0].channelBuffers32, bypassPoints, strengthPoints);
+            ? audio(d, d.inputs[0].channelBuffers64, d.outputs[0].channelBuffers64, bypassPoints, strengthPoints, advance)
+            : audio(d, d.inputs[0].channelBuffers32, d.outputs[0].channelBuffers32, bypassPoints, strengthPoints, advance);
     }
 private:
     void applyChanges(Points& bypassPoints, Points& strengthPoints, int32 sample) {
         bypassPoints.applyThrough(sample, [this](double v) { bypassed = v >= .5; });
 #ifdef VOICE_ISOLATOR_RTX
-        strengthPoints.applyThrough(sample, [this](double v) { strength = static_cast<uint8>(strengthIndex(v)); });
+        strengthPoints.applyThrough(sample, [this](double v) { strength = static_cast<uint8>(presetIndex(v)); });
 #endif
     }
     void reset() {
@@ -345,45 +392,47 @@ private:
 #endif
         readySeen = false; tracking = false;
     }
+    void startStream(uint32 advance) {
+        if (!readySeen) {
+            bridge.reset(cursor, advance);
+            readySeen = true;
+        }
+    }
     static void report(IParameterChanges* changes, ParamID id, double val) {
         if (!changes) return;
         int32 index = 0;
         if (auto q = changes->addParameterData(id, index)) q->addPoint(0, val, index);
     }
 #ifdef VOICE_ISOLATOR_RTX
-    uint8 latencyMode() const { return static_cast<uint8>(latencyRevision.load() & 1u); }
-    void setLatencyMode(uint8 mode) {
-        // Each toggle flips the low bit. Preset recalls and audio-thread edits
-        // publish the mode and its notice number in one atomic update.
-        auto revision = latencyRevision.load();
-        while ((revision & 1u) != mode) {
-            if (latencyRevision.compare_exchange_weak(revision, revision + 1u)) return;
+    uint32 timingMode() const { return timingRevision.load() & timingBits; }
+    void setTiming(uint32 mask, uint32 bits) {
+        // A project recall updates both controls together. A single edit also
+        // preserves concurrent edits to the other control.
+        auto revision = timingRevision.load();
+        while ((revision & mask) != bits) {
+            const auto mode = (revision & timingBits & ~mask) | bits;
+            const auto next = ((revision & ~timingBits) + revisionStep) | mode;
+            if (timingRevision.compare_exchange_weak(revision, next)) return;
         }
     }
 #endif
     void reportLatency(IParameterChanges* changes) {
 #ifdef VOICE_ISOLATOR_RTX
-        const auto revision = latencyRevision.load();
+        const auto revision = timingRevision.load();
         ParamValue notice = 0.; // Supersede any queued request if the host already has this delay.
-        if (delays[revision & 1u] != reported.load()) {
+        if (delays[revision & timingBits] != reported.load()) {
             // An odd stride visits every step, while placing adjacent mode
             // changes half a scale apart for hosts that round parameter values.
             const auto stride = latencyNoticeSteps / 2u + 1u;
-            const auto step = (revision * stride) % latencyNoticeSteps + 1u;
+            const auto step = ((revision / revisionStep) * stride) % latencyNoticeSteps + 1u;
             notice = static_cast<ParamValue>(step) / latencyNoticeSteps;
         }
         report(changes, LatencyNotice, notice);
 #endif
     }
     template<class Sample>
-    tresult audio(ProcessData& d, Sample** in, Sample** out, Points& bypassPoints, Points& strengthPoints) {
+    tresult audio(ProcessData& d, Sample** in, Sample** out, Points& bypassPoints, Points& strengthPoints, uint32 advance) {
         const int channels = d.inputs[0].numChannels, count = d.numSamples;
-#ifdef VOICE_ISOLATOR_RTX
-        if (const uint32 selected = delays[latencyMode()]; selected != delay) {
-            delay = selected;
-            reset();
-        }
-#endif
         const bool silent0 = (d.inputs[0].silenceFlags & 1) || !in || !in[0];
         const bool silent1 = channels < 2 || (d.inputs[0].silenceFlags & 2) || !in || !in[1];
         for (int i=0; i<count; ++i) {
@@ -393,7 +442,7 @@ private:
         int state = bridge.state();
         if (state == 0 && d.processMode == kOffline) state = bridge.waitReady() ? 1 : -1;
         if (state == 1) {
-            if (!readySeen) { bridge.reset(cursor); readySeen = true; }
+            startStream(advance);
             bridge.publish(cursor, count, mono.data(), nullptr);
             if (d.processMode == kOffline) bridge.waitWet(cursor + count - delay);
         }
@@ -440,9 +489,9 @@ private:
     std::array<WetGapFader, 2> gapFaders;
     StrengthRamp strengthRamp;
     std::atomic<uint8> strength{defaultStrength};
-    std::atomic<uint32> latencyRevision{0};
+    std::atomic<uint32> timingRevision{0};
     std::atomic<uint32> reported{0};
-    std::array<uint32, 2> delays{2176, modelLookahead + lowGpuBudget + 128};
+    std::array<uint32, 6> delays = processingDelays(1., 128, 0);
 #endif
     std::array<std::vector<double>,2> dry;
     std::vector<float> mono;
