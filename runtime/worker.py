@@ -5,12 +5,16 @@ import mmap
 import os
 from pathlib import Path
 import sys
+import time
 import traceback
 
 CAPACITY = 1 << 18
 HEADER = 128
 MAGIC, STOP, STATE, EPOCH, ORIGIN, INPUT_END, CONSUMED, WET_EPOCH, WET_END, PID, ADVANCE_MODE = range(11)
 ADVANCE_HOPS = (1.0, 1.5, 2.0)  # Default, 5 ms earlier, 10 ms earlier at a 480-sample hop.
+IDLE_BEFORE_SPARE = 0.1  # Seconds without audio before spare frames start.
+SPARE_PERIOD = 0.006  # Seconds between spare frames. They are lighter than live ones, so they run more often.
+SPARE_LIMIT = 600  # Seconds without audio after which the GPU is left to rest.
 
 
 class Shared:
@@ -115,6 +119,50 @@ def warm_up(model, np):
         session.push(np.zeros(480, np.float32))
 
 
+class KeepWarm:
+    """Run frames nobody hears while no audio arrives, so the GPU keeps its working speed.
+
+    A GPU with nothing to do lowers its clocks within seconds. On an RTX 4070
+    the first frames after five idle seconds took 25 to 70 ms instead of
+    2.5 ms, for about a quarter of a second. A host that stops calling the
+    plug-in during silence then loses the start of the next phrase. Light work
+    does not prevent this, and neither do frames of the model at a slow pace:
+    one every 50 ms left the next live frames at 20 ms. The spare frames run
+    on a session of their own with a short attention window (76 MiB), which
+    makes them lighter than live frames. One every 10 ms still let the clock
+    fall to 950 MHz and doubled the time of the next live frames. One every
+    6 ms holds about 2200 MHz, and live frames resume at their usual time.
+    The live session's output stays bit-identical. The GPU draws about 42 W
+    this way, against 49 W with live audio and 21 to 28 W at rest, so the
+    spare frames stop after ten minutes without audio.
+    """
+
+    def __init__(self, model, np):
+        # A short window needs no full-size attention buffers.
+        preallocate, model.preallocate = model.preallocate, False
+        try:
+            self.session = model.stream()
+        finally:
+            model.preallocate = preallocate
+        self.session.window_frames, self.session.crossfade_frames = 32, 2
+        self.session.push(np.zeros(1024, np.float32))
+        self.silence = np.zeros(480, np.float32)
+        self.heard = self.due = time.perf_counter()
+        # Short waits end on time instead of at the next 15.6 ms system tick.
+        ct.WinDLL("winmm").timeBeginPeriod(1)
+
+    def wait(self, shared, milliseconds):
+        """Wait this long for audio at most, or run a spare frame if one is due."""
+        now = time.perf_counter()
+        if IDLE_BEFORE_SPARE <= now - self.heard < SPARE_LIMIT:
+            if now >= self.due:
+                self.session.push(self.silence)
+                self.due = max(self.due + SPARE_PERIOD, now)
+                return
+            milliseconds = min(milliseconds, max(1, round((self.due - now) * 1000)))
+        shared.win.WaitForSingleObject(shared.input_event, milliseconds)
+
+
 def run(shared, root, rate, packaged=False):
     raise_priority()
     sys.path.insert(0, str(root / "inworld"))
@@ -145,6 +193,7 @@ def run(shared, root, rate, packaged=False):
     with torch.inference_mode():
         warm_up(model, np)
         session = model.stream()
+        spare = KeepWarm(model, np)
         torch.cuda.synchronize()
         # A full garbage collection walks every object created while loading and stops
         # this thread for tens of milliseconds. Later collections skip the frozen objects,
@@ -158,7 +207,7 @@ def run(shared, root, rate, packaged=False):
         while not shared.get(STOP):
             epoch = shared.get(EPOCH)
             if not epoch or epoch & 1:
-                shared.win.WaitForSingleObject(shared.input_event, 10)
+                spare.wait(shared, 10)
                 continue
             if previous != epoch:
                 origin = shared.get(ORIGIN)
@@ -183,8 +232,9 @@ def run(shared, root, rate, packaged=False):
             if shared.get(EPOCH) != epoch:
                 continue
             if available <= 0:
-                shared.win.WaitForSingleObject(shared.input_event, 50)
+                spare.wait(shared, 50)
                 continue
+            spare.heard = time.perf_counter()
             n = min(available, 4096, CAPACITY - read % CAPACITY)
             x = input_ring[read % CAPACITY:read % CAPACITY+n].copy()
             if shared.get(EPOCH) != epoch:
