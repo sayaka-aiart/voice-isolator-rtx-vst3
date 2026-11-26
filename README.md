@@ -4,7 +4,9 @@
 
 This repository contains the source for Voice Isolator RTX, a Windows x64 VST3 plug-in that reduces background noise in speech in real time.
 
-In version 1.2.0, select **5 ms** or **10 ms** under **Extra synthesis advance** to reduce the plug-in delay reported to your DAW by that amount at 48 kHz. The default **0 ms** uses the same synthesis timing as version 1.1.0.
+Version 1.3.0 adds **Dual mono**. For a binaural microphone, route its left and right inputs to one stereo track, insert one Voice Isolator RTX, and turn on **Dual mono**. The plug-in processes each side independently. With the button off (the default), it processes the average of the inputs and sends the result to both sides. Select the mode before recording or going live. Changing it briefly mutes the output, even with Bypass on. The DAW saves the setting with the project.
+
+Select **5 ms** or **10 ms** under **Extra synthesis advance** to reduce the plug-in delay reported to your DAW by that amount at 48 kHz. The default **0 ms** uses the same synthesis timing as version 1.1.0.
 
 **Noise reduction** sets the mix. At 100% (default), you hear only the processed audio. The 80% and 50% settings blend in 20% and 50% of the original audio, respectively.
 
@@ -24,7 +26,7 @@ All modes reserve a full maximum host block for variable callbacks. At 48 kHz, a
 
 If **Processed audio** drops below 100% under GPU load, switch to Standard. Changing either latency control asks the DAW to update plug-in delay compensation. Playback can briefly pause while the new synthesis stream fills.
 
-Projects from earlier versions open with **0 ms** extra advance and retain their saved noise reduction, bypass and latency settings. Projects predating the Low latency control use Standard. Version 1.1.0 can reopen settings saved at 0 ms. Settings saved at 5 or 10 ms require version 1.2.0 or later.
+Projects saved before 1.3.0 open with **Dual mono** off. Projects saved before 1.2.0 open with **0 ms** extra advance. Saved noise reduction, bypass and latency settings are retained. Projects predating the Low latency control use Standard. With **Dual mono** off, settings saved at 0 ms can reopen in 1.1.0, and settings saved at 5 or 10 ms require at least 1.2.0. Settings saved with **Dual mono** on require 1.3.0 or later.
 
 ## Build
 
@@ -49,7 +51,7 @@ To locate the engine, the plug-in reads the `EngineRoot` value under `HKCU\Softw
 
 ## Download the inference model
 
-Extract `VoiceIsolatorRTX-1.2.0-Windows-x64.zip`, close your DAW, and run `VoiceIsolatorRTX-1.2.0-Setup-x64.exe`. On a new PC, setup installs the VST3 and engine 1.0.0 and downloads and verifies the model. When upgrading in the same location, setup reuses the verified engine and model. To use a build from this repository, copy your entire built VST3 folder over the installed one, then reopen the DAW.
+Extract `VoiceIsolatorRTX-1.3.0-Windows-x64.zip`, close your DAW, and run `VoiceIsolatorRTX-1.3.0-Setup-x64.exe`. On a new PC, setup installs the VST3 and engine 1.0.0 and downloads and verifies the model. When upgrading in the same location, setup reuses the verified engine and model. To use a build from this repository, copy your entire built VST3 folder over the installed one, then reopen the DAW.
 
 Voice Isolator RTX uses Inworld's realtime checkpoint, `denoiser_realtime.safetensors` (232,780,800 bytes, about 233 MB). To get the model separately, save it to an empty folder using the download link, or open PowerShell there and run the command below. [Download the model from Hugging Face](https://huggingface.co/inworld/voice-isolator/resolve/9b0285b3fe8403aa8e2f1dbb2165a80a4294c970/denoiser_realtime.safetensors)
 
