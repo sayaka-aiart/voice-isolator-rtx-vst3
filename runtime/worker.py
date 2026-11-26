@@ -157,7 +157,10 @@ class KeepWarm:
         if IDLE_BEFORE_SPARE <= now - self.heard < SPARE_LIMIT:
             if now >= self.due:
                 self.session.push(self.silence)
-                self.due = max(self.due + SPARE_PERIOD, now)
+                self.due += SPARE_PERIOD
+                if self.due <= now:
+                    # Skip missed ticks when entering idle or resuming after a stall.
+                    self.due = now + SPARE_PERIOD
                 return
             milliseconds = min(milliseconds, max(1, round((self.due - now) * 1000)))
         shared.win.WaitForSingleObject(shared.input_event, milliseconds)
