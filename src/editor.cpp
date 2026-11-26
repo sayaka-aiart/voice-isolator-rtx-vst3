@@ -12,7 +12,7 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 namespace {
 constexpr int width = 366, height = 225;
-constexpr int firstButton = 400, bypassButton = 403, latencyButton = 404, firstAdvanceButton = 405;
+constexpr int firstButton = 400, bypassButton = 403, latencyButton = 404, firstAdvanceButton = 405, stereoButton = 408;
 constexpr COLORREF panel = RGB(25, 30, 35), button = RGB(42, 50, 57), edge = RGB(68, 80, 88);
 constexpr COLORREF accent = RGB(116, 223, 194), ink = RGB(236, 240, 241), muted = RGB(179, 193, 196);
 
@@ -50,9 +50,10 @@ public:
             advanceButtons[i] = control(L"BUTTON", advances[i], BS_AUTORADIOBUTTON | BS_PUSHLIKE |
                                         (i == 0 ? WS_GROUP | WS_TABSTOP : 0), firstAdvanceButton + i);
         }
+        stereo = control(L"BUTTON", L"Dual mono", BS_AUTOCHECKBOX | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, stereoButton);
         gpu = control(L"STATIC", L"", SS_CENTERIMAGE);
         coverage = control(L"STATIC", L"", SS_CENTERIMAGE | SS_RIGHT);
-        if (!title || !advanceTitle || !gpu || !coverage || !bypass || !latency ||
+        if (!title || !advanceTitle || !gpu || !coverage || !bypass || !latency || !stereo ||
             std::find(buttons.begin(), buttons.end(), nullptr) != buttons.end() ||
             std::find(advanceButtons.begin(), advanceButtons.end(), nullptr) != advanceButtons.end()) {
             destroy();
@@ -81,7 +82,7 @@ public:
         return onSize(&wanted);
     }
 private:
-    HWND window{}, title{}, advanceTitle{}, bypass{}, latency{}, gpu{}, coverage{};
+    HWND window{}, title{}, advanceTitle{}, bypass{}, latency{}, stereo{}, gpu{}, coverage{};
     std::array<HWND, 3> buttons{}, advanceButtons{};
     std::array<HFONT, 3> fonts{};
     int lastGpu = -1, lastCoverage = -1;
@@ -98,7 +99,7 @@ private:
     }
     void destroy() {
         if (window) DestroyWindow(window);
-        window = title = advanceTitle = bypass = latency = gpu = coverage = nullptr;
+        window = title = advanceTitle = bypass = latency = stereo = gpu = coverage = nullptr;
         buttons.fill(nullptr);
         advanceButtons.fill(nullptr);
         for (auto& font : fonts) { if (font) DeleteObject(font); font = nullptr; }
@@ -124,7 +125,8 @@ private:
         place(title, 18, 12, 150, 29, fonts[0]);
         place(latency, 176, 14, 93, 25, fonts[2]);
         place(bypass, 277, 14, 71, 25, fonts[2]);
-        place(advanceTitle, 18, 101, 330, 29, fonts[0]);
+        place(advanceTitle, 18, 101, 229, 29, fonts[0]);
+        place(stereo, 255, 103, 93, 25, fonts[2]);
         for (int i = 0; i < 3; ++i) {
             place(buttons[i], 18 + 113*i, 49, 104, 44, fonts[1]);
             place(advanceButtons[i], 18 + 113*i, 137, 104, 40, fonts[0]);
@@ -149,6 +151,7 @@ private:
         }
         check(bypass, controller->getParamNormalized(Bypass) >= .5);
         check(latency, controller->getParamNormalized(Latency) >= .5);
+        check(stereo, controller->getParamNormalized(StereoInput) >= .5);
         const int state = std::clamp(static_cast<int>(std::lround(controller->getParamNormalized(Engine) * 3)), 0, 3);
         if (state != lastGpu) {
             constexpr const wchar_t* states[] = {L"GPU engine   Loading", L"GPU engine   Ready",
@@ -167,15 +170,15 @@ private:
     void click(int id) {
         ParamID param;
         double value;
-        if (id >= firstAdvanceButton) {
+        if (id == stereoButton || id == bypassButton || id == latencyButton) {
+            param = id == stereoButton ? StereoInput : id == bypassButton ? Bypass : Latency;
+            value = controller->getParamNormalized(param) >= .5 ? 0. : 1.;
+        } else if (id >= firstAdvanceButton) {
             param = SynthesisAdvance;
             value = normalizedPreset(id - firstAdvanceButton);
-        } else if (id < bypassButton) {
+        } else {
             param = Strength;
             value = normalizedPreset(2 - (id - firstButton));
-        } else {
-            param = id == bypassButton ? Bypass : Latency;
-            value = controller->getParamNormalized(param) >= .5 ? 0. : 1.;
         }
         if (controller->getParamNormalized(param) != value) {
             controller->beginEdit(param);
@@ -221,7 +224,7 @@ private:
             EndPaint(h, &ps);
             return 0;
         }
-        if (msg == WM_KEYDOWN && h != self->bypass && h != self->latency &&
+        if (msg == WM_KEYDOWN && h != self->bypass && h != self->latency && h != self->stereo &&
             (w == VK_LEFT || w == VK_RIGHT || w == VK_UP || w == VK_DOWN)) {
             int delta = w == VK_LEFT || w == VK_UP ? -1 : 1;
             const int id = GetDlgCtrlID(h);
@@ -239,7 +242,7 @@ private:
         auto self = reinterpret_cast<StrengthEditor*>(data);
         switch (msg) {
         case WM_COMMAND:
-            if (HIWORD(w) == BN_CLICKED && LOWORD(w) >= firstButton && LOWORD(w) < firstAdvanceButton + 3) {
+            if (HIWORD(w) == BN_CLICKED && LOWORD(w) >= firstButton && LOWORD(w) <= stereoButton) {
                 self->click(LOWORD(w));
                 return 0;
             }

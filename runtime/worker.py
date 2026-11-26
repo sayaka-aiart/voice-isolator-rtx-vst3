@@ -1,4 +1,8 @@
-"""Local Windows worker for one 48 kHz Inworld Isolator 38 VST3 instance."""
+"""Local Windows worker for one 48 kHz Inworld Isolator 38 VST3 instance.
+
+An instance sends one channel, or the left and right channels of a stereo
+track to be isolated separately.
+"""
 from contextlib import closing
 import ctypes as ct
 import gc
@@ -8,10 +12,12 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import weakref
 
 CAPACITY = 1 << 18
 HEADER = 128
-MAGIC, STOP, STATE, EPOCH, ORIGIN, INPUT_END, CONSUMED, WET_EPOCH, WET_END, PID, ADVANCE_MODE = range(11)
+MAX_CHANNELS = 2
+MAGIC, STOP, STATE, EPOCH, ORIGIN, INPUT_END, CONSUMED, WET_EPOCH, WET_END, PID, ADVANCE_MODE, CHANNELS = range(12)
 ADVANCE_HOPS = (1.0, 1.5, 2.0)  # Default, 5 ms earlier, 10 ms earlier at a 480-sample hop.
 IDLE_BEFORE_SPARE = 0.1  # Seconds without audio before spare frames start.
 SPARE_PERIOD = 0.006  # Seconds between spare frames. They are lighter than live ones, so they run more often.
@@ -20,7 +26,7 @@ SPARE_LIMIT = 600  # Seconds without audio after which the GPU is left to rest.
 
 class Shared:
     def __init__(self, binary, name):
-        self.mapping = mmap.mmap(-1, HEADER + 8 * CAPACITY, tagname=name)
+        self.mapping = mmap.mmap(-1, HEADER + 8 * MAX_CHANNELS * CAPACITY, tagname=name)
         self.addr = ct.addressof(ct.c_char.from_buffer(self.mapping))
         self.dll = ct.CDLL(str(binary))
         self.dll.IwiLoad.argtypes = [ct.c_void_p]
@@ -34,7 +40,7 @@ class Shared:
         self.win.SetEvent.argtypes = [ct.c_void_p]
         self.input_event = self.win.OpenEventW(0x100000, 0, name + "-input")
         self.output_event = self.win.OpenEventW(2, 0, name + "-output")
-        if self.get(MAGIC) != 0x495749333802 or not self.input_event or not self.output_event:
+        if self.get(MAGIC) != 0x495749333803 or not self.input_event or not self.output_event:
             raise RuntimeError("VST3 IPC protocol mismatch")
 
     def get(self, key):
@@ -118,6 +124,52 @@ def warm_up(model, np):
     session.push(np.zeros(1024, np.float32))
     for _ in range(2 * window - 1):
         session.push(np.zeros(480, np.float32))
+
+
+def offset_windows(session, frames):
+    """Place this session's attention windows ``frames`` ahead of its audio.
+
+    A frame costs about 1.7 times as much while one window fades into the
+    next, the last third of every window. Sessions that start together reach
+    that stretch together. On an RTX 4070 that other programs were also
+    using, the two frames of a 10 ms step then took 10.6 ms in the median,
+    against 8.4 ms with the windows half a window apart.
+
+    The engine finds its place in a window from the session's frame count,
+    so the two methods that read it see the count moved on. The session
+    opens part-way through a window, holding as much history as the first
+    window of any stream does at that age. Its output differs from an
+    unmoved session's by about -44 dB, as one window differs from another.
+    """
+    stream, current = type(session), weakref.proxy(session)
+
+    def moved(method):
+        def call(*arguments):
+            current._frames += frames
+            try:
+                return method(current, *arguments)
+            finally:
+                current._frames -= frames
+        return call
+
+    next_cut, windowed = moved(stream._next_cut), moved(stream._windowed)
+
+    def blend(features, film, count):
+        known = len(current.boundaries)
+        raw = windowed(features, film, count)
+        current.boundaries[known:] = [frame - frames for frame in current.boundaries[known:]]
+        return raw
+
+    session._next_cut = lambda: next_cut() - frames
+    session._windowed = blend
+
+
+def open_sessions(model, channels):
+    """One session per channel, their windows spread evenly so no two fade at once."""
+    sessions = [model.stream() for _ in range(channels)]
+    for index, session in enumerate(sessions[1:], 1):
+        offset_windows(session, index * session.window_frames // channels)
+    return sessions
 
 
 class GpuActivity:
@@ -254,12 +306,13 @@ def run(shared, root, rate, packaged=False):
     torch.backends.cudnn.benchmark = False
     model = ComparisonModel(lookahead=0, variant="ordered", advance_hops=ADVANCE_HOPS[0])
     model.sections = ChainedSections(model.base.vi.model, model.optimized_bands)
-    input_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
-    output_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*CAPACITY)
+    rings = (MAX_CHANNELS, CAPACITY)
+    input_ring = np.ndarray(rings, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
+    output_ring = np.ndarray(rings, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*MAX_CHANNELS*CAPACITY)
     device = torch.cuda.get_device_properties(torch.cuda.current_device())
     with torch.inference_mode(), closing(GpuActivity(shared, getattr(device, "uuid", None))) as activity:
         warm_up(model, np)
-        session = model.stream()
+        sessions = open_sessions(model, 1)
         spare = KeepWarm(model, np, activity)
         torch.cuda.synchronize()
         # A full garbage collection walks every object created while loading and stops
@@ -279,17 +332,22 @@ def run(shared, root, rate, packaged=False):
             if previous != epoch:
                 origin = shared.get(ORIGIN)
                 mode = shared.get(ADVANCE_MODE)
+                channels = shared.get(CHANNELS)
                 if shared.get(EPOCH) != epoch:
                     continue
                 if not 0 <= mode < len(ADVANCE_HOPS):
                     raise ValueError(f"Unsupported synthesis advance mode {mode}")
-                if used or model.advance_hops != ADVANCE_HOPS[mode]:
+                if not 1 <= channels <= MAX_CHANNELS:
+                    raise ValueError(f"Unsupported channel count {channels}")
+                if used or model.advance_hops != ADVANCE_HOPS[mode] or len(sessions) != channels:
                     model.advance_hops = ADVANCE_HOPS[mode]
-                    session = model.stream()
+                    sessions = None  # Return the old sessions' buffers before the new ones are made.
+                    sessions = open_sessions(model, channels)
                 used = False
-                resample_in, resample_out = RateConverter(np, rate, 48000), RateConverter(np, 48000, rate)
+                resample_in = [RateConverter(np, rate, 48000) for _ in sessions]
+                resample_out = [RateConverter(np, 48000, rate) for _ in sessions]
                 read = emitted = origin
-                pending = np.empty(0, np.float32)
+                pending = [np.empty(0, np.float32) for _ in sessions]
                 needed = 1024
                 previous = epoch
                 shared.set(CONSUMED, read)
@@ -303,23 +361,29 @@ def run(shared, root, rate, packaged=False):
                 continue
             spare.heard = time.perf_counter()
             n = min(available, 4096, CAPACITY - read % CAPACITY)
-            x = input_ring[read % CAPACITY:read % CAPACITY+n].copy()
+            x = input_ring[:channels, read % CAPACITY:read % CAPACITY+n].copy()
             if shared.get(EPOCH) != epoch:
                 continue
             read += n
             shared.set(CONSUMED, read)
-            pending = np.concatenate((pending, resample_in.push(x)))
-            while len(pending) >= needed and shared.get(EPOCH) == epoch and not shared.get(STOP):
+            pending = [np.concatenate((held, converter.push(part)))
+                       for held, converter, part in zip(pending, resample_in, x)]
+            while len(pending[0]) >= needed and shared.get(EPOCH) == epoch and not shared.get(STOP):
                 activity.mark_active(time.perf_counter())
-                y = resample_out.push(session.push(pending[:needed]))
-                pending = pending[needed:]
+                # The channels hold the same number of samples at every step, and the
+                # plug-in sees a frame only once every channel has it.
+                y = [converter.push(session.push(held[:needed]))
+                     for converter, session, held in zip(resample_out, sessions, pending)]
+                pending = [held[needed:] for held in pending]
                 needed, used = 480, True
-                if len(y):
+                count = len(y[0])
+                if count:
                     pos = emitted % CAPACITY
-                    first = min(len(y), CAPACITY - pos)
-                    output_ring[pos:pos+first] = y[:first]
-                    output_ring[:len(y)-first] = y[first:]
-                    emitted += len(y)
+                    first = min(count, CAPACITY - pos)
+                    for ring, samples in zip(output_ring, y):
+                        ring[pos:pos+first] = samples[:first]
+                        ring[:count-first] = samples[first:]
+                    emitted += count
                     shared.set(WET_END, emitted)
                     shared.notify()
 

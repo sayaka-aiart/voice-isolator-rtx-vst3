@@ -6,7 +6,7 @@
 namespace isolator {
 enum : Steinberg::Vst::ParamID {
     Bypass = 100, Engine = 101, Coverage = 102, Strength = 103, Latency = 104, LatencyNotice = 105,
-    SynthesisAdvance = 106
+    SynthesisAdvance = 106, StereoInput = 107
 };
 inline constexpr std::array<double, 3> wetFractions{.5, .8, 1.};
 inline constexpr int defaultStrength = 2;
