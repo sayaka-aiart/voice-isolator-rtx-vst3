@@ -1,4 +1,5 @@
 """Local Windows worker for one 48 kHz Inworld Isolator 38 VST3 instance."""
+from contextlib import closing
 import ctypes as ct
 import gc
 import mmap
@@ -119,6 +120,66 @@ def warm_up(model, np):
         session.push(np.zeros(480, np.float32))
 
 
+class GpuActivity:
+    """Share the latest real work and elect one idle worker per CUDA UUID and Windows session."""
+
+    def __init__(self, shared, device_uuid):
+        self.dll, self.win = shared.dll, shared.win
+        self.mutex = None
+        self.keeper = False
+        self.store_latest = getattr(self.dll, "IwiStoreMax", None)
+        if device_uuid is None or self.store_latest is None:
+            return
+
+        name = rf"Local\VoiceIsolatorRTX-GpuWarm-v1-{device_uuid}"
+        self.store_latest.argtypes = [ct.c_void_p, ct.c_int64]
+        self.store_latest.restype = None
+        self.win.CreateMutexW.argtypes = [ct.c_void_p, ct.c_int, ct.c_wchar_p]
+        self.win.CreateMutexW.restype = ct.c_void_p
+        self.win.ReleaseMutex.argtypes = self.win.CloseHandle.argtypes = [ct.c_void_p]
+        mutex = self.win.CreateMutexW(None, False, name + "-keeper")
+        if not mutex:
+            return
+        try:
+            # Both plug-ins store a monotonic timestamp in nanoseconds in this one word.
+            self.mapping = mmap.mmap(-1, 8, tagname=name + "-activity")
+        except OSError:
+            self.win.CloseHandle(mutex)
+            return  # Host restrictions can prevent sharing. Keep the local idle policy.
+        self.address = ct.addressof(ct.c_char.from_buffer(self.mapping))
+        self.mutex = mutex
+
+    def release_keeper(self):
+        if self.keeper:
+            self.win.ReleaseMutex(self.mutex)
+            self.keeper = False
+
+    def mark_active(self, now):
+        """Publish actual GPU work, including startup warm-up, to other instances."""
+        if self.mutex:
+            self.store_latest(self.address, round(now * 1_000_000_000))
+            self.release_keeper()
+
+    def should_warm(self, now, heard):
+        if self.mutex and now - heard >= IDLE_BEFORE_SPARE:
+            heard = max(heard, self.dll.IwiLoad(self.address) / 1_000_000_000)
+        if not IDLE_BEFORE_SPARE <= now - heard < SPARE_LIMIT:
+            self.release_keeper()
+            return False
+        if self.mutex and not self.keeper:
+            # A worker that exits while holding this mutex leaves it available to the next waiter.
+            result = self.win.WaitForSingleObject(self.mutex, 0)
+            self.keeper = result in (0, 0x80)  # WAIT_OBJECT_0 or WAIT_ABANDONED
+        return not self.mutex or self.keeper
+
+    def close(self):
+        if self.mutex:
+            self.release_keeper()
+            self.win.CloseHandle(self.mutex)
+            self.mapping.close()
+            self.mutex = None
+
+
 class KeepWarm:
     """Run frames nobody hears while no audio arrives, so the GPU keeps its working speed.
 
@@ -137,7 +198,8 @@ class KeepWarm:
     spare frames stop after ten minutes without audio.
     """
 
-    def __init__(self, model, np):
+    def __init__(self, model, np, activity):
+        self.activity = activity
         # A short window needs no full-size attention buffers.
         preallocate, model.preallocate = model.preallocate, False
         try:
@@ -148,13 +210,14 @@ class KeepWarm:
         self.session.push(np.zeros(1024, np.float32))
         self.silence = np.zeros(480, np.float32)
         self.heard = self.due = time.perf_counter()
+        self.activity.mark_active(self.due)
         # Short waits end on time instead of at the next 15.6 ms system tick.
         ct.WinDLL("winmm").timeBeginPeriod(1)
 
     def wait(self, shared, milliseconds):
         """Wait this long for audio at most, or run a spare frame if one is due."""
         now = time.perf_counter()
-        if IDLE_BEFORE_SPARE <= now - self.heard < SPARE_LIMIT:
+        if self.activity.should_warm(now, self.heard):
             if now >= self.due:
                 self.session.push(self.silence)
                 self.due += SPARE_PERIOD
@@ -193,10 +256,11 @@ def run(shared, root, rate, packaged=False):
     model.sections = ChainedSections(model.base.vi.model, model.optimized_bands)
     input_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER)
     output_ring = np.ndarray(CAPACITY, dtype=np.float32, buffer=shared.mapping, offset=HEADER + 4*CAPACITY)
-    with torch.inference_mode():
+    device = torch.cuda.get_device_properties(torch.cuda.current_device())
+    with torch.inference_mode(), closing(GpuActivity(shared, getattr(device, "uuid", None))) as activity:
         warm_up(model, np)
         session = model.stream()
-        spare = KeepWarm(model, np)
+        spare = KeepWarm(model, np, activity)
         torch.cuda.synchronize()
         # A full garbage collection walks every object created while loading and stops
         # this thread for tens of milliseconds. Later collections skip the frozen objects,
@@ -246,6 +310,7 @@ def run(shared, root, rate, packaged=False):
             shared.set(CONSUMED, read)
             pending = np.concatenate((pending, resample_in.push(x)))
             while len(pending) >= needed and shared.get(EPOCH) == epoch and not shared.get(STOP):
+                activity.mark_active(time.perf_counter())
                 y = resample_out.push(session.push(pending[:needed]))
                 pending = pending[needed:]
                 needed, used = 480, True

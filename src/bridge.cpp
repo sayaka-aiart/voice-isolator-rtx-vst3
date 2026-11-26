@@ -12,6 +12,15 @@ extern "C" __declspec(dllexport) long long IwiLoad(volatile LONG64* p) {
 extern "C" __declspec(dllexport) void IwiStore(volatile LONG64* p, LONG64 v) {
     InterlockedExchange64(p, v);
 }
+// Audio workers on the same GPU can publish their timestamps in a different order.
+extern "C" __declspec(dllexport) void IwiStoreMax(volatile LONG64* p, LONG64 value) {
+    auto previous = IwiLoad(p);
+    while (previous < value) {
+        const auto observed = InterlockedCompareExchange64(p, value, previous);
+        if (observed == previous) return;
+        previous = observed;
+    }
+}
 namespace isolator {
 namespace fs = std::filesystem;
 static fs::path modulePath() {
